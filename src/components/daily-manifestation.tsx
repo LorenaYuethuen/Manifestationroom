@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Check, Calendar, Sun, Moon, Sparkles, Clock } from 'lucide-react';
-import type { VisionAnalysis } from '../App';
+import { Check, Calendar, Sun, Moon, Sparkles, Clock, Activity, BookOpen, Coffee } from 'lucide-react';
+import type { VisionAnalysis } from './enhanced-analysis';
 
 interface DailyTask {
   id: string;
-  category: 'morning' | 'afternoon' | 'evening';
+  category: 'morning' | 'workday' | 'evening';
   time: string;
   action: string;
   fromModule: string;
@@ -24,8 +24,7 @@ export function DailyManifestationDashboard({
   onTaskComplete 
 }: DailyManifestationDashboardProps) {
   const [tasks, setTasks] = useState<DailyTask[]>([]);
-  const [currentDate, setCurrentDate] = useState(new Date());
-
+  
   // Calculate days since upload
   const daysSinceUpload = Math.floor((Date.now() - analysis.uploadedAt) / (1000 * 60 * 60 * 24));
   const currentWeek = Math.min(Math.floor(daysSinceUpload / 7) + 1, 4);
@@ -43,10 +42,10 @@ export function DailyManifestationDashboard({
         <div>
           <h2 className="text-2xl text-white font-light flex items-center gap-2">
             <Calendar className="w-6 h-6 text-amber-400" />
-            Day {daysSinceUpload + 1} Manifestation
+            Day {daysSinceUpload + 1} LifeFlow
           </h2>
           <p className="text-neutral-400 text-sm mt-1">
-            Week {currentWeek} Focus: {getWeekFocus(currentWeek)}
+            Focus: {getWeekFocus(currentWeek)}
           </p>
         </div>
         <div className="text-right">
@@ -71,7 +70,7 @@ export function DailyManifestationDashboard({
       {/* Timeline */}
       <div className="flex-1 overflow-y-auto space-y-6 pr-4">
         <TimelineSection 
-          title="Morning Rituals" 
+          title="Morning Ritual (晨间仪式)" 
           icon={Sun} 
           tasks={tasks.filter(t => t.category === 'morning')}
           completedTasks={completedTasks}
@@ -79,15 +78,15 @@ export function DailyManifestationDashboard({
         />
         
         <TimelineSection 
-          title="Daily Actions" 
-          icon={Sparkles} 
-          tasks={tasks.filter(t => t.category === 'afternoon')}
+          title="Workday Flow (生活流)" 
+          icon={Activity} 
+          tasks={tasks.filter(t => t.category === 'workday')}
           completedTasks={completedTasks}
           onToggle={onTaskComplete}
         />
         
         <TimelineSection 
-          title="Evening Reflection" 
+          title="Evening Reset (晚间复盘)" 
           icon={Moon} 
           tasks={tasks.filter(t => t.category === 'evening')}
           completedTasks={completedTasks}
@@ -167,7 +166,7 @@ function TimelineSection({
                   </span>
                 </div>
                 <p className="text-xs text-amber-500/70 mt-1">
-                  from {task.fromModule}
+                  {task.fromModule}
                 </p>
               </div>
 
@@ -185,12 +184,12 @@ function TimelineSection({
 
 function getWeekFocus(week: number): string {
   const focuses = [
-    'Clarity & Purification',
-    'Habit Architecture',
-    'Sensory Immersion',
-    'Integration & Flow'
+    'Write & Plan (定频)',
+    'Do: Routine (筑基)',
+    'Do: Growth (精进)',
+    'Check & Elevate (复盘)'
   ];
-  return focuses[week - 1] || 'Mastery';
+  return focuses[week - 1] || 'Living Flow';
 }
 
 export function generateDailyTasks(analysis: VisionAnalysis, dayIndex: number): DailyTask[] {
@@ -198,69 +197,60 @@ export function generateDailyTasks(analysis: VisionAnalysis, dayIndex: number): 
   const week = Math.floor(dayIndex / 7);
   const dayOfWeek = dayIndex % 7;
 
-  // 1. Morning Ritual (from dailyRituals or DAILY_ROUTINE SOP)
-  const routineModule = analysis.sopMapping?.find(m => m.module === 'DAILY_ROUTINE');
-  const morningAction = routineModule?.actions?.[0] || analysis.lifestyleInference?.dailyRituals?.[0] || "Morning meditation";
+  // 1. Morning Ritual (Based on user's specific routine: Meditate, Eat, Yoga/Stretch)
+  const routineModule = analysis.sopMapping?.find(m => m.subSystem === 'Daily Routine');
+  const morningAction = routineModule?.actions?.[0] || analysis.lifestyleInference?.dailyRituals?.[0] || "冥想/听经 + 八段锦/拉伸";
 
   tasks.push({
     id: `task-${analysis.id}-${dayIndex}-morning`,
     category: 'morning',
     time: '07:00 AM',
     action: morningAction,
-    fromModule: 'DAILY_ROUTINE',
+    fromModule: 'Daily Routine',
     completed: false
   });
 
-  // 2. Main Action (from manifestationPath or SOP)
-  // Use week specific actions if available
-  const weekPlan = analysis.manifestationPath?.find(w => w.week === week + 1);
+  // 2. Workday Flow (The core DO action for the day)
+  // Varies by day: Growth, Output, or Health
+  const growthModule = analysis.sopMapping?.find(m => m.subSystem === 'Growth');
+  const healthModule = analysis.sopMapping?.find(m => m.subSystem === 'Health');
+  const outputModule = analysis.sopMapping?.find(m => m.subSystem === 'Output');
   
-  if (weekPlan && weekPlan.actions.length > 0) {
-    tasks.push({
-      id: `task-${analysis.id}-${dayIndex}-afternoon`,
-      category: 'afternoon',
-      time: '02:00 PM',
-      action: weekPlan.actions[dayOfWeek % weekPlan.actions.length],
-      fromModule: `WEEK ${week + 1} FOCUS`,
-      completed: false
-    });
-  } else {
-    // Fallback to iterating through SOP modules for variety
-    // Day 0: INVENTORY, Day 1: HEALTH, Day 2: SPACE, etc.
-    const sopModules = analysis.sopMapping || [];
-    if (sopModules.length > 0) {
-      const sopModule = sopModules[dayOfWeek % sopModules.length];
-      if (sopModule && sopModule.actions.length > 0) {
-         tasks.push({
-          id: `task-${analysis.id}-${dayIndex}-afternoon-sop`,
-          category: 'afternoon',
-          time: '03:00 PM',
-          action: sopModule.actions[0],
-          fromModule: sopModule.module,
-          completed: false
-        });
-      }
-    }
-  }
-
-  // 3. Sensory or Specific Module Task (Evening)
-  const senses = ['smell', 'sound', 'touch', 'visual'] as const;
-  const todaySense = senses[dayIndex % 4];
-  let senseAction = '';
+  let middayTask = { action: "深度工作/学习 1小时", module: "Growth" };
   
-  switch(todaySense) {
-    case 'smell': senseAction = `Experience: ${analysis.sensoryTriggers?.smell || "Deep breathing"}`; break;
-    case 'sound': senseAction = `Listen to: ${analysis.sensoryTriggers?.sound || "Nature sounds"}`; break;
-    case 'touch': senseAction = `Interact with: ${analysis.sensoryTriggers?.touch || "Texture awareness"}`; break;
-    case 'visual': senseAction = `Observe lighting: ${analysis.visualDNA?.lighting || "Candlelight"}`; break;
+  if (dayOfWeek % 3 === 0 && growthModule?.actions?.[0]) {
+     middayTask = { action: growthModule.actions[0], module: "Growth" };
+  } else if (dayOfWeek % 3 === 1 && healthModule?.actions?.[0]) {
+     middayTask = { action: healthModule.actions[0], module: "Health" };
+  } else if (dayOfWeek % 3 === 2 && outputModule?.actions?.[0]) {
+     middayTask = { action: outputModule.actions[0], module: "Output" };
   }
 
   tasks.push({
-    id: `task-${analysis.id}-${dayIndex}-evening`,
+    id: `task-${analysis.id}-${dayIndex}-workday`,
+    category: 'workday',
+    time: '02:00 PM',
+    action: middayTask.action,
+    fromModule: middayTask.module,
+    completed: false
+  });
+
+  // 3. Evening Reset (Based on user's specific routine: Skincare, Read, Meditate)
+  tasks.push({
+    id: `task-${analysis.id}-${dayIndex}-evening-prep`,
     category: 'evening',
-    time: '08:00 PM',
-    action: senseAction,
-    fromModule: 'SENSORY_ANCHORING',
+    time: '09:00 PM',
+    action: '护肤/听音乐 + 准备明日衣物/食物',
+    fromModule: 'Daily Routine',
+    completed: false
+  });
+
+  tasks.push({
+    id: `task-${analysis.id}-${dayIndex}-evening-check`,
+    category: 'evening',
+    time: '10:00 PM',
+    action: '15分钟复盘 (CHECK) + 入睡冥想',
+    fromModule: 'Review',
     completed: false
   });
 
@@ -270,7 +260,7 @@ export function generateDailyTasks(analysis: VisionAnalysis, dayIndex: number): 
 export function getSensoryReminders(analysis: VisionAnalysis) {
   return [
     { type: 'smell', instruction: analysis.sensoryTriggers?.smell, icon: Wind },
-    { type: 'sound', instruction: analysis.sensoryTriggers?.sound, icon: Music },
+    { type: 'sound', instruction: analysis.sensoryTriggers?.sound, icon: Sparkles }, // Changed icon
     { type: 'touch', instruction: analysis.sensoryTriggers?.touch, icon: Coffee },
   ];
 }

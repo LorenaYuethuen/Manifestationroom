@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
-import { Upload, Sparkles } from 'lucide-react';
+import { Upload, Sparkles, Image as ImageIcon } from 'lucide-react';
 import { motion } from 'motion/react';
+import demoBoardImage from "figma:asset/318ecba03917c9b13cb1675721ebf1579e7acaf6.png";
 
 interface UploadStageProps {
   onImagesUploaded: (files: File[]) => void;
@@ -10,6 +11,7 @@ interface UploadStageProps {
 export function UploadStage({ onImagesUploaded, existingCount }: UploadStageProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [isLoadingDemo, setIsLoadingDemo] = useState(false);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -40,6 +42,20 @@ export function UploadStage({ onImagesUploaded, existingCount }: UploadStageProp
       setSelectedFiles(prev => [...prev, ...files]);
     }
   }, []);
+
+  const handleLoadDemo = async () => {
+    setIsLoadingDemo(true);
+    try {
+      const response = await fetch(demoBoardImage);
+      const blob = await response.blob();
+      const file = new File([blob], "My_Vision_Board_Demo.png", { type: "image/png" });
+      setSelectedFiles(prev => [...prev, file]);
+    } catch (error) {
+      console.error("Failed to load demo image:", error);
+    } finally {
+      setIsLoadingDemo(false);
+    }
+  };
 
   const handleBegin = () => {
     if (selectedFiles.length > 0) {
@@ -93,7 +109,7 @@ export function UploadStage({ onImagesUploaded, existingCount }: UploadStageProp
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           className={`
-            relative border-2 border-dashed rounded-3xl p-16 mb-8
+            relative border-2 border-dashed rounded-3xl p-12 mb-8
             transition-all duration-500
             ${isDragging 
               ? 'border-amber-400 bg-amber-400/5 scale-[1.02]' 
@@ -110,29 +126,46 @@ export function UploadStage({ onImagesUploaded, existingCount }: UploadStageProp
             className="hidden"
           />
           
-          <label 
-            htmlFor="file-upload"
-            className="cursor-pointer flex flex-col items-center gap-6"
-          >
-            <motion.div
-              animate={{ 
-                y: isDragging ? -10 : 0,
-                scale: isDragging ? 1.1 : 1 
-              }}
-              transition={{ duration: 0.3 }}
+          <div className="flex flex-col items-center gap-6">
+            <label 
+              htmlFor="file-upload"
+              className="cursor-pointer flex flex-col items-center gap-4 group"
             >
-              <Upload className="w-20 h-20 text-neutral-500" strokeWidth={1.5} />
-            </motion.div>
-            
-            <div className="text-center">
-              <p className="text-2xl text-neutral-300 mb-2">
-                拖拽图片到此处，或点击上传
-              </p>
-              <p className="text-neutral-500">
-                支持 JPG、PNG、WEBP 格式，可上传多张图片
-              </p>
+              <motion.div
+                animate={{ 
+                  y: isDragging ? -10 : 0,
+                  scale: isDragging ? 1.1 : 1 
+                }}
+                transition={{ duration: 0.3 }}
+              >
+                <Upload className="w-16 h-16 text-neutral-500 group-hover:text-amber-400 transition-colors" strokeWidth={1.5} />
+              </motion.div>
+              
+              <div className="text-center">
+                <p className="text-xl text-neutral-300 mb-2 group-hover:text-white transition-colors">
+                  拖拽图片到此处，或点击上传
+                </p>
+                <p className="text-neutral-500 text-sm">
+                  支持 JPG、PNG、WEBP
+                </p>
+              </div>
+            </label>
+
+            <div className="flex items-center gap-4 w-full max-w-xs">
+               <div className="h-px bg-neutral-800 flex-1" />
+               <span className="text-neutral-600 text-xs uppercase tracking-widest">OR</span>
+               <div className="h-px bg-neutral-800 flex-1" />
             </div>
-          </label>
+
+            <button
+              onClick={handleLoadDemo}
+              disabled={isLoadingDemo}
+              className="flex items-center gap-2 px-6 py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-all text-sm font-medium border border-neutral-700"
+            >
+              <ImageIcon className="w-4 h-4" />
+              {isLoadingDemo ? 'Loading...' : '使用我的愿景板 Demo'}
+            </button>
+          </div>
         </motion.div>
 
         {/* Selected Files Preview */}
