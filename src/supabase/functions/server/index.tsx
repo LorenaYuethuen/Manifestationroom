@@ -1,14 +1,21 @@
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import * as kv from "./kv_store.tsx";
 
 const app = new Hono();
 
-// Enable logger
-app.use('*', logger(console.log));
+// Initialize Supabase Client for Storage & Auth
+const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Enable CORS for all routes and methods
+// Constants
+const BUCKET_NAME = "make-dcd239fe-visions";
+
+// Middleware
+app.use('*', logger(console.log));
 app.use(
   "/*",
   cors({
@@ -20,12 +27,106 @@ app.use(
   }),
 );
 
-// Health check endpoint
-app.get("/make-server-dcd239fe/health", (c) => {
-  return c.json({ status: "ok" });
+// Helper: Ensure bucket exists
+async function ensureBucket() {
+  const { data: buckets } = await supabase.storage.listBuckets();
+  const bucketExists = buckets?.some(b => b.name === BUCKET_NAME);
+  if (!bucketExists) {
+    await supabase.storage.createBucket(BUCKET_NAME, {
+      public: false,
+      fileSizeLimit: 10485760, // 10MB
+    });
+  }
+}
+
+// Routes
+
+// 1. Health
+app.get("/make-server-dcd239fe/health", (c) => c.json({ status: "ok" }));
+
+// 2. Upload Image (Storage)
+app.post("/make-server-dcd239fe/upload", async (c) => {
+  try {
+    await ensureBucket();
+    const body = await c.req.parseBody();
+    const file = body['file'];
+
+    if (!file || !(file instanceof File)) {
+      return c.json({ error: "No file uploaded" }, 400);
+    }
+
+    const fileName = `${Date.now()}-${file.name}`;
+    const { data, error } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(fileName, file, {
+        contentType: file.type,
+        upsert: false
+      });
+
+    if (error) throw error;
+
+    // Create signed URL (valid for 1 year for simplicity in this demo context, or handle refresh)
+    const { data: signedData, error: signedError } = await supabase.storage
+      .from(BUCKET_NAME)
+      .createSignedUrl(fileName, 31536000);
+
+    if (signedError) throw signedError;
+
+    return c.json({ url: signedData.signedUrl });
+  } catch (err) {
+    console.error("Upload error:", err);
+    return c.json({ error: err.message }, 500);
+  }
 });
 
-// Notion Sync Endpoint
+// 3. Save Vision Analysis (KV Store)
+app.post("/make-server-dcd239fe/visions", async (c) => {
+  try {
+    const { vision } = await c.req.json();
+    if (!vision || !vision.id) {
+      return c.json({ error: "Invalid vision data" }, 400);
+    }
+    
+    // Store in KV
+    // Key format: vision-{timestamp}-{random}
+    await kv.set(vision.id, vision);
+    
+    return c.json({ success: true });
+  } catch (err) {
+    console.error("Save error:", err);
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// 4. List Visions (KV Store)
+app.get("/make-server-dcd239fe/visions", async (c) => {
+  try {
+    // Get all keys starting with 'vision-'
+    // Since kv.getByPrefix returns values directly
+    const visions = await kv.getByPrefix("vision-");
+    
+    // Sort by timestamp descending
+    const sorted = visions.sort((a: any, b: any) => b.uploadedAt - a.uploadedAt);
+    
+    return c.json({ data: sorted });
+  } catch (err) {
+    console.error("List error:", err);
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// 5. Delete Vision
+app.delete("/make-server-dcd239fe/visions/:id", async (c) => {
+  try {
+    const id = c.req.param("id");
+    await kv.del(id);
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// 6. Notion Sync (Existing)
 app.post("/make-server-dcd239fe/sync-notion", async (c) => {
   try {
     const notionKey = c.req.header("x-notion-key");
@@ -37,55 +138,108 @@ app.post("/make-server-dcd239fe/sync-notion", async (c) => {
 
     const { analysis } = await c.req.json();
     
-    // Construct Notion Blocks from Analysis
-    const children = [
-      {
-        object: "block",
-        type: "heading_1",
-        heading_1: {
-          rich_text: [{ type: "text", text: { content: `✨ Vision Analysis: ${analysis.visualDNA.archetype}` } }]
-        }
-      },
-      {
-        object: "block",
-        type: "callout",
-        callout: {
-          icon: { emoji: "🔮" },
-          rich_text: [{ type: "text", text: { content: `Emotional Core: ${analysis.visualDNA.emotionalCore.join(", ")}` } }]
-        }
-      },
-      {
-        object: "block",
-        type: "heading_2",
-        heading_2: {
-          rich_text: [{ type: "text", text: { content: "Action Plan (SOP Mapped)" } }]
-        }
-      }
-    ];
+    // Helper to create children blocks
+    const children = [];
 
-    // Add SOP Items
+    // Vision Header
+    children.push({
+      object: "block",
+      type: "heading_1",
+      heading_1: {
+        rich_text: [{ type: "text", text: { content: `🎨 Vision: ${analysis.visualDNA.archetype}` } }]
+      }
+    });
+
+    // Image (if available)
+    if (analysis.imageUrl) {
+      children.push({
+        object: "block",
+        type: "image",
+        image: {
+          type: "external",
+          external: { url: analysis.imageUrl }
+        }
+      });
+    }
+
+    // DNA Callout
+    children.push({
+      object: "block",
+      type: "callout",
+      callout: {
+        icon: { emoji: "🔮" },
+        rich_text: [
+          { type: "text", text: { content: `Values: ${analysis.lifestyleInference.values.join(" • ")}\n` } },
+          { type: "text", text: { content: `Materials: ${analysis.visualDNA.materials.join(", ")}` } }
+        ]
+      }
+    });
+
+    // SOP Section
+    children.push({
+      object: "block",
+      type: "heading_2",
+      heading_2: {
+        rich_text: [{ type: "text", text: { content: "⚡ SOP Execution" } }]
+      }
+    });
+
+    const sopGroups: Record<string, any[]> = { "WRITE_PLAN": [], "PLAN": [], "DO": [], "CHECK": [] };
     analysis.sopMapping.forEach((item: any) => {
+      if (sopGroups[item.module]) sopGroups[item.module].push(item);
+    });
+
+    for (const [module, items] of Object.entries(sopGroups)) {
        children.push({
          object: "block",
          type: "heading_3",
          heading_3: {
-           rich_text: [{ type: "text", text: { content: `${item.module} - ${item.subSystem}` } }]
+           rich_text: [{ type: "text", text: { content: module } }],
+           color: "blue_background"
          }
        });
-       
-       item.actions.forEach((action: string) => {
-         children.push({
-           object: "block",
-           type: "to_do",
-           to_do: {
-             rich_text: [{ type: "text", text: { content: action } }],
-             checked: false
-           }
-         });
+
+       items.forEach((item: any) => {
+          children.push({
+            object: "block",
+            type: "paragraph",
+            paragraph: {
+              rich_text: [
+                { type: "text", text: { content: `📍 ${item.subSystem}`, annotations: { bold: true } } },
+                { type: "text", text: { content: ` (Cue: ${item.visualCue})`, annotations: { italic: true, color: "gray" } } }
+              ]
+            }
+          });
+          item.actions.forEach((action: string) => {
+            children.push({
+              object: "block",
+              type: "to_do",
+              to_do: {
+                rich_text: [{ type: "text", text: { content: action } }],
+                checked: false
+              }
+            });
+          });
        });
+    }
+
+    // Routine Section
+    children.push({
+      object: "block",
+      type: "heading_2",
+      heading_2: {
+        rich_text: [{ type: "text", text: { content: "📅 Generated Daily Routine" } }]
+      }
     });
 
-    // Call Notion API to append blocks to the page
+    const routines = analysis.lifestyleInference.dailyRituals || [];
+    if (routines.length > 0) {
+        routines.forEach((r: string) => 
+            children.push({ object: "block", type: "to_do", to_do: { rich_text: [{ type: "text", text: { content: r } }], checked: false } })
+        );
+    }
+
+    // Call Notion API
     const response = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
       method: "PATCH",
       headers: {
@@ -97,11 +251,7 @@ app.post("/make-server-dcd239fe/sync-notion", async (c) => {
     });
 
     const data = await response.json();
-    
-    if (!response.ok) {
-      console.error("Notion API Error:", data);
-      return c.json({ error: data.message || "Failed to sync to Notion" }, 500);
-    }
+    if (!response.ok) return c.json({ error: data.message || "Failed to sync" }, 500);
 
     return c.json({ success: true, data });
   } catch (error) {

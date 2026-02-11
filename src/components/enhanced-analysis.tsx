@@ -25,8 +25,8 @@ interface ClaudeVisionResponse {
     touch: string;
   };
   sopMapping: {
-    module: string; // 对应用户SOP的四大板块: WRITE_PLAN, PLAN, DO, CHECK
-    subSystem: string; // 对应具体的子系统
+    module: string; // WRITE_PLAN, PLAN, DO, CHECK
+    subSystem: string; // 对应具体的数据库名称
     visualCue: string;
     actions: string[];
   }[];
@@ -36,9 +36,6 @@ interface ClaudeVisionResponse {
 // API Implementations
 // ==========================================
 
-/**
- * Claude API Implementation
- */
 async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise<ClaudeVisionResponse> {
   const base64Image = await fileToBase64(imageFile);
   
@@ -53,7 +50,7 @@ async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise
     body: JSON.stringify({
       model: 'claude-3-5-sonnet-20240620',
       max_tokens: 4000,
-      system: "你是一个协助用户进行'生活显化'的AI架构师。用户有一套非常具体的 Notion SOP 系统 (LIFE COMPASS)，你的任务是将愿景板图片中的元素，精准映射到这套系统中。",
+      system: "你是一个协助用户进行'生活显化'的AI架构师。用户有一套完整的 LIFE COMPASS 系统，你的任务是将愿景板(Mood Board)中的元素，严格按照用户的 SOP 框架拆解并分发到具体的 DATABASE 中。",
       messages: [
         {
           role: 'user',
@@ -77,47 +74,34 @@ async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise
   });
 
   const data = await response.json();
-  
-  if (data.error) {
-      throw new Error(data.error.message);
-  }
-
-  const analysisText = data.content[0].text;
-  return parseAIResponse(analysisText);
+  if (data.error) throw new Error(data.error.message);
+  return parseAIResponse(data.content[0].text);
 }
 
-/**
- * Gemini API Implementation with Model Fallback
- */
 async function analyzeVisionWithGemini(imageFile: File, apiKey: string): Promise<ClaudeVisionResponse> {
   const base64Image = await fileToBase64(imageFile);
-  
+  // Optimized model list: prioritized stable versions first, then legacy fallbacks
   const models = [
-    'gemini-1.5-flash', 
-    'gemini-1.5-flash-latest', 
+    'gemini-1.5-flash',
     'gemini-1.5-pro',
-    'gemini-pro-vision'
+    'gemini-1.5-flash-001',
+    'gemini-1.5-pro-001',
+    'gemini-pro-vision' // Legacy fallback
   ];
   
   let lastError;
 
   for (const model of models) {
     try {
+      console.log(`🤖 Trying Gemini Model: ${model}`);
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{
             parts: [
-              { text: "你是一个协助用户进行'生活显化'的AI架构师。用户有一套非常具体的 Notion SOP 系统 (LIFE COMPASS)，你的任务是将愿景板图片中的元素，精准映射到这套系统中。\n\n" + VISION_ANALYSIS_PROMPT },
-              {
-                inline_data: {
-                  mime_type: imageFile.type,
-                  data: base64Image
-                }
-              }
+              { text: "你是一个协助用户进行'生活显化'的AI架构师。用户有一套完整的 LIFE COMPASS 系统，你的任务是将愿景板(Mood Board)中的元素，严格按照用户的 SOP 框架拆解并分发到具体的 DATABASE 中。\n\n" + VISION_ANALYSIS_PROMPT },
+              { inline_data: { mime_type: imageFile.type, data: base64Image } }
             ]
           }]
         }),
@@ -125,92 +109,93 @@ async function analyzeVisionWithGemini(imageFile: File, apiKey: string): Promise
 
       const data = await response.json();
       
+      // Explicitly handle 404 (Not Found) or 400 (Bad Request) which often means model not found
       if (data.error) {
-        if (data.error.code === 403 || data.error.status === 'PERMISSION_DENIED') {
-             throw new Error(data.error.message);
+        console.warn(`❌ Gemini Error (${model}):`, data.error);
+        // If specific model not found, continue to next
+        if (data.error.message?.includes('not found') || data.error.message?.includes('not supported')) {
+           console.log(`Model ${model} not available, trying next...`);
+           lastError = new Error(data.error.message);
+           continue; 
         }
         throw new Error(data.error.message);
       }
-
-      if (!data.candidates || !data.candidates[0]?.content?.parts?.[0]?.text) {
-          throw new Error('Invalid response structure from Gemini');
-      }
-
-      const analysisText = data.candidates[0].content.parts[0].text;
-      return parseAIResponse(analysisText);
-
+      
+      if (!data.candidates?.[0]?.content?.parts?.[0]?.text) throw new Error('Invalid response');
+      return parseAIResponse(data.candidates[0].content.parts[0].text);
     } catch (e: any) {
-      console.warn(`Model ${model} failed:`, e.message);
       lastError = e;
-      if (e.message?.includes('API key not valid') || e.message?.includes('PERMISSION_DENIED')) {
-          break;
-      }
+      // If unauthorized, stop trying other models (key is invalid)
+      if (e.message?.includes('API key') || e.message?.includes('PERMISSION')) break;
     }
   }
-
   throw lastError || new Error('All Gemini models failed');
 }
-
-// ==========================================
-// Helper: Parse AI Response
-// ==========================================
 
 function parseAIResponse(text: string): ClaudeVisionResponse {
   try {
     const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[1]);
-    }
+    if (jsonMatch) return JSON.parse(jsonMatch[1]);
     const firstBrace = text.indexOf('{');
     const lastBrace = text.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1) {
-        return JSON.parse(text.substring(firstBrace, lastBrace + 1));
-    }
+    if (firstBrace !== -1 && lastBrace !== -1) return JSON.parse(text.substring(firstBrace, lastBrace + 1));
     return JSON.parse(text);
   } catch (e) {
-    console.error("Failed to parse JSON from AI:", text);
+    console.error("Failed to parse JSON:", text);
     throw new Error("AI response format error");
   }
 }
 
 // ==========================================
-// AI Prompt Template - Customized for User's Notion SOP
+// AI Prompt Template - Strictly Aligned with User's Notion Structure
 // ==========================================
 
 const VISION_ANALYSIS_PROMPT = `
-请分析这张愿景图片，并将其转化为用户个人 Notion SOP 系统 (LIFE COMPASS) 中的具体元素。
+请分析这张愿景图片(MOOD BOARD)，并将其转化为用户 LIFE COMPASS 系统中的具体元素。
 
-用户的 **真实生活系统 (True Context)** 如下：
-1. **WRITE_PLAN**: 灵感收集、Mood Board、Wishlist。
-2. **PLAN (OKR)**: 目标管理、关键成果、目标周期。
-3. **DO (执行系统)**:
-   - **Daily Routine (早)**: 
-     - 醒来冥想/听金刚经解读。
-     - 早餐: 打豆浆/蒸玉米/红薯/煮鸡蛋。
-     - 运动: 八段锦/拉伸/瑜伽。
-     - 学习: 1小时专业知识 (营养学/神经科学/历史人文)。
-     - 通勤: 骑车上班 (自然出汗)。
-   - **Daily Routine (晚)**:
-     - 运动: 骑车回家 + 居家无氧。
-     - 仪式: 洗澡护肤(听音乐) -> 阅读/听佛乐 -> 冥想入眠。
-     - 准备: 泡明天的豆子、洗玉米。
-   - **Weekend**: 骑行探店(咖啡/饭店)、攀岩、观影输出、备菜(更新食谱)。
-   - **Growth**: Heptabase 知识管理、RIA 阅读系统、云看秀。
-   - **Output**: 内容创作系统。
-   - **Inventory**: 物品库存、收支管理。
-4. **CHECK**: 每日复盘(15分钟无氧提升)、每周/月复盘。
+用户的 **SOP 系统架构** 如下：
 
-请严格按照以下 JSON 格式输出，将图片中的视觉元素与上述具体习惯结合：
+1. **WRITE_PLAN (收集与灵感)**
+   - 对应模块: **收集箱**
+   - 动作: 提取愿景中的核心价值、材质、色彩，放入收集箱。
+
+2. **PLAN (目标与拆解)**
+   - 对应模块: **OKR及项目管理**
+   - 数据库: 目标管理(Goals), 关键成果(Key Results), 目标周期.
+   - 动作: 将愿景转化为具体的OKR。
+
+3. **DO (执行与落地 - DATABASE 分发)**
+   请将识别出的元素分发到以下具体数据库：
+   - **物品库存**: 生活物品库存, 收支管理, Finance (如: 购买特定材质的家具).
+   - **生活习惯**: Health, 健身运动管理 2.0, 习惯追踪器.
+   - **运动饮食**: 营养与健康, 饮食计划器, Workout (如: 原型食物, 骑行).
+   - **活动计划**: 活动与旅行计划, 行前准备清单 (如: 探店, 旅行).
+   - **输出创造**: 云看秀, R.I.A. 阅读系统, 内容创作系统.
+   - **学习进度**: 知识管理, Heptabase, Learn.
+   - **GTD管理**: 项目管理, 任务管理, Projects.
+
+4. **CHECK (复盘与纠偏)**
+   - 对应模块: **回顾纠偏**
+   - 动作: 设定复盘周期(每日/周/月)对照 MOOD BOARD。
+
+5. **LIFESTYLE (生活方式 - DAILY_ROUTINE)**
+   用户固定的 Routine 结构，请将愿景元素融入其中：
+   - **晚上睡前**: 冥想, 阅读(听佛乐), 准备明日装备/食物(泡豆子/洗玉米).
+   - **早上自然醒**: 冥想(金刚经), 早餐(打豆浆/蒸红薯/煮鸡蛋), 八段锦/瑜伽, 学习1小时(专业知识).
+   - **工作日**: 骑车通勤(自然出汗), 下班无氧, 复盘15分钟.
+   - **周末**: 骑行+咖啡馆阅读, 攀岩, 观影输出, 备餐(更新食谱).
+
+请严格按照以下 JSON 格式输出：
 
 \`\`\`json
 {
   "visualDNA": {
-    "colorPalette": ["#Hex", "#Hex", "#Hex"],
+    "colorPalette": ["#Hex", "#Hex"],
     "materials": ["材质1", "材质2"],
     "lighting": "光线描述",
     "spatialFeeling": "空间感受",
     "emotionalCore": ["情感1", "情感2"],
-    "archetype": "生活原型 (如: 'Mindful Urban Monk')"
+    "archetype": "生活原型 (如: 'Mediterranean Slow Life')"
   },
   "lifestyleInference": {
     "pace": "生活节奏",
@@ -225,76 +210,59 @@ const VISION_ANALYSIS_PROMPT = `
   "sopMapping": [
     {
       "module": "WRITE_PLAN",
-      "subSystem": "Inspiration",
-      "visualCue": "图片中...",
-      "actions": ["将图片中的...加入 Notion Wishlist", "在 Mood Board 中更新..."]
+      "subSystem": "收集箱",
+      "visualCue": "图片中的...",
+      "actions": ["将...灵感加入收集箱", "定义愿景关键词..."]
     },
     {
       "module": "PLAN",
-      "subSystem": "OKR",
-      "visualCue": "图片暗示了...",
-      "actions": ["设定关于...的OKR目标", "关键结果: 每周完成..."]
-    },
-    {
-      "module": "DO",
-      "subSystem": "Daily Routine",
-      "visualCue": "图片氛围...",
-      "actions": ["晨间: 在金刚经冥想后...", "晚间: 泡豆子时..."]
-    },
-    {
-      "module": "DO",
-      "subSystem": "Health",
+      "subSystem": "OKR及项目管理",
       "visualCue": "...",
-      "actions": ["饮食: 尝试...原型食物", "运动: 骑行前往..."]
+      "actions": ["设定目标: ...", "KR: 每周完成..."]
     },
     {
       "module": "DO",
-      "subSystem": "Growth",
+      "subSystem": "生活物品库存", 
       "visualCue": "...",
-      "actions": ["在 Heptabase 中建立...卡片", "使用 RIA 方法阅读..."]
+      "actions": ["采购...材质的物品", "整理...区域"]
     },
     {
       "module": "DO",
-      "subSystem": "Output",
+      "subSystem": "营养与健康",
       "visualCue": "...",
-      "actions": ["输出一篇关于...的内容", "记录...的灵感"]
+      "actions": ["尝试...食谱", "准备...食材"]
+    },
+    {
+      "module": "DO",
+      "subSystem": "R.I.A. 阅读系统",
+      "visualCue": "...",
+      "actions": ["阅读...主题书籍", "输出笔记"]
+    },
+    {
+      "module": "DO",
+      "subSystem": "活动与旅行计划",
+      "visualCue": "...",
+      "actions": ["计划去...探店", "安排...旅行"]
     },
     {
       "module": "CHECK",
-      "subSystem": "Review",
+      "subSystem": "回顾纠偏",
       "visualCue": "...",
-      "actions": ["复盘...的执行情况", "检查..."]
+      "actions": ["每周对比愿景图...", "检查习惯执行率"]
     }
   ]
 }
 \`\`\`
-
-**要求：**
-1. **深度融合**: 行动建议必须深度融合用户的真实习惯（如"泡豆子"、"Heptabase"、"骑行"、"金刚经"等）。
-2. **Visual Cue**: 解释图片如何触发这些特定的习惯。
-3. 输出为**中文**。
 `;
-
-// ==========================================
-// Utility Functions
-// ==========================================
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      const base64 = result.split(',')[1]; // Remove data URL prefix
-      resolve(base64);
-    };
+    reader.onload = () => resolve((reader.result as string).split(',')[1]);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
 }
-
-// ==========================================
-// React Hook
-// ==========================================
 
 export function useVisionAnalysis() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -305,36 +273,21 @@ export function useVisionAnalysis() {
     setIsAnalyzing(true);
     setProgress(0);
     const analyses: VisionAnalysis[] = [];
-    
     const claudeKey = localStorage.getItem('anthropic_api_key');
     const geminiKey = localStorage.getItem('gemini_api_key');
 
     for (let i = 0; i < files.length; i++) {
       try {
         let aiResult: ClaudeVisionResponse;
-
         if (files[i].name === "My_Vision_Board_Demo.png") {
-            if (geminiKey && geminiKey.startsWith('AIza')) {
-               try {
-                 aiResult = await analyzeVisionWithGemini(files[i], geminiKey);
-               } catch (e) {
-                 console.warn("Gemini failed for demo, falling back to perfect mock");
-                 aiResult = getDemoMockResponse();
-               }
-            } else {
-               aiResult = getDemoMockResponse();
-            }
+          aiResult = getDemoMockResponse();
         } else {
-            if (geminiKey && geminiKey.startsWith('AIza')) {
-               aiResult = await analyzeVisionWithGemini(files[i], geminiKey);
-            } else if (claudeKey && claudeKey.startsWith('sk-ant')) {
-               aiResult = await analyzeVisionWithClaude(files[i], claudeKey);
-            } else {
-               throw new Error('NO_VALID_API_KEY');
-            }
+          if (geminiKey?.startsWith('AIza')) aiResult = await analyzeVisionWithGemini(files[i], geminiKey);
+          else if (claudeKey?.startsWith('sk-ant')) aiResult = await analyzeVisionWithClaude(files[i], claudeKey);
+          else throw new Error('NO_VALID_API_KEY');
         }
         
-        const analysis: VisionAnalysis = {
+        analyses.push({
           id: `vision-${Date.now()}-${i}`,
           imageUrl: URL.createObjectURL(files[i]),
           uploadedAt: Date.now(),
@@ -343,16 +296,13 @@ export function useVisionAnalysis() {
           sensoryTriggers: aiResult.sensoryTriggers,
           sopMapping: aiResult.sopMapping,
           manifestationPath: generateManifestationPath(aiResult),
-        };
-
-        analyses.push(analysis);
+        });
         setProgress(((i + 1) / files.length) * 100);
       } catch (error) {
-        console.warn(`Analysis failed (using fallback):`, error);
+        console.warn(`Analysis failed:`, error);
         analyses.push(await generateFallbackAnalysis(files[i], i));
       }
     }
-
     setResults(analyses);
     setIsAnalyzing(false);
     return analyses;
@@ -365,204 +315,169 @@ function generateManifestationPath(aiResult: ClaudeVisionResponse) {
   return [
     {
       week: 1,
-      focus: 'WRITE & PLAN (Notion Setup)',
+      focus: 'WRITE & PLAN (收集与定源)',
       actions: [
-        aiResult.sopMapping.find(m => m.module === 'WRITE_PLAN')?.actions[0] || '整理 Notion Wishlist',
-        aiResult.sopMapping.find(m => m.module === 'PLAN')?.actions[0] || '更新本月 OKR',
+        aiResult.sopMapping.find(m => m.module === 'WRITE_PLAN')?.actions[0] || '更新收集箱',
+        aiResult.sopMapping.find(m => m.module === 'PLAN')?.actions[0] || '设定本月OKR',
       ],
     },
     {
       week: 2,
-      focus: 'DO: Routine (Morning & Night)',
+      focus: 'DO: 空间与物品 (Inventory)',
       actions: [
-        aiResult.sopMapping.find(m => m.subSystem === 'Daily Routine')?.actions[0] || '晨间金刚经冥想',
-        aiResult.sopMapping.find(m => m.subSystem === 'Health')?.actions[0] || '备餐：蒸玉米/红薯',
+        aiResult.sopMapping.find(m => m.subSystem === '生活物品库存')?.actions[0] || '清理空间',
+        '断舍离不符物品',
       ],
     },
     {
       week: 3,
-      focus: 'DO: Growth (Heptabase)',
+      focus: 'DO: 习惯与健康 (Routine)',
       actions: [
-        aiResult.sopMapping.find(m => m.subSystem === 'Growth')?.actions[0] || 'Heptabase 知识卡片整理',
-        aiResult.sopMapping.find(m => m.subSystem === 'Output')?.actions[0] || 'RIA 阅读笔记输出',
+        aiResult.sopMapping.find(m => m.subSystem === '营养与健康')?.actions[0] || '优化晨间仪式',
+        '执行每日骑行/运动',
       ],
     },
     {
       week: 4,
-      focus: 'CHECK (Review & Elevate)',
+      focus: 'CHECK & OUTPUT (创造与复盘)',
       actions: [
-        aiResult.sopMapping.find(m => m.module === 'CHECK')?.actions[0] || 'Notion 月度复盘',
-        '调整下个月的健身计划',
+        aiResult.sopMapping.find(m => m.subSystem === 'R.I.A. 阅读系统')?.actions[0] || 'Heptabase 输出',
+        aiResult.sopMapping.find(m => m.module === 'CHECK')?.actions[0] || '月度复盘',
       ],
     },
   ];
 }
 
-// ==========================================
-// Enhanced Fallback (Mock AI with REAL Notion Context)
-// ==========================================
-
 function getDemoMockResponse(): ClaudeVisionResponse {
-    return {
-        visualDNA: {
-          colorPalette: ['#2C2C2C', '#8B6F47', '#D4C4B7'],
-          materials: ['Walnut Wood', 'Ceramic', 'Linen'],
-          lighting: 'Warm ambient & Natural spotlight',
-          spatialFeeling: 'Wabi-sabi & Minimalist',
-          emotionalCore: ['Serenity', 'Focus', 'Warmth'],
-          archetype: 'Wabi-sabi Creator (侘寂创造者)'
-        },
-        lifestyleInference: {
-          pace: 'Intentional & Slow',
-          values: ['Mindfulness', 'Aesthetics', 'Growth'],
-          dailyRituals: ['Pour-over Coffee', 'Cat Cuddling', 'Reading']
-        },
-        sensoryTriggers: {
-          smell: 'Fresh soy milk & Old books',
-          sound: 'Buddhist music & Vinyl crackle',
-          touch: 'Rough pottery & Soft cat fur'
-        },
-        sopMapping: [
-          {
-            module: 'WRITE_PLAN',
-            subSystem: 'Inspiration',
-            visualCue: '极简主义与阅读观影板块',
-            actions: ['在 Notion Mood Board 中更新"侘寂风"灵感', '将"实木书桌"加入 Wishlist']
-          },
-          {
-            module: 'PLAN',
-            subSystem: 'OKR',
-            visualCue: 'Career & Growth 板块',
-            actions: ['设定季度"个人品牌"增长目标', 'KR: 每周在 Heptabase 输出一篇深度笔记']
-          },
-          {
-            module: 'DO',
-            subSystem: 'Daily Routine',
-            visualCue: 'Coffee Corner & Routine 板块',
-            actions: ['晨间听金刚经解读 + 手冲咖啡', '晚间泡豆子准备明日早餐']
-          },
-          {
-            module: 'DO',
-            subSystem: 'Health',
-            visualCue: 'Healthy Diet & 身体健康板块',
-            actions: ['坚持早餐原型食物 (玉米/红薯/鸡蛋)', '骑行上班 (自然出汗)']
-          },
-          {
-            module: 'DO',
-            subSystem: 'Growth',
-            visualCue: '阅读观影 & Routine 板块',
-            actions: ['晨间1小时学习 (神经科学)', '使用 RIA 方法阅读并记录笔记']
-          },
-          {
-            module: 'DO',
-            subSystem: 'Output',
-            visualCue: '笔记本电脑 & 创作环境',
-            actions: ['整理"生活方式观察"到内容创作系统', '更新云看秀数据库']
-          },
-          {
-            module: 'CHECK',
-            subSystem: 'Review',
-            visualCue: '整体风格的一致性',
-            actions: ['每晚15分钟复盘无氧训练', '检查 Notion 习惯追踪器']
-          }
-        ]
-      };
-}
-
-async function generateFallbackAnalysis(file: File, index: number): Promise<VisionAnalysis> {
-  await new Promise(resolve => setTimeout(resolve, 1500));
-
-  const seed = file.name.length + index;
-  
-  const archetypes = [
-    {
-      name: 'Disciplined Flow (自律心流)',
-      routine: '晨间八段锦 + 深度工作',
-      health: '早餐打豆浆 + 蒸红薯',
-      growth: 'Heptabase 整理显化笔记',
-    },
-    {
-      name: 'Nature Connection (自然连接)',
-      routine: '周末骑行去公园阅读',
-      health: '增加户外骑行有氧时间',
-      growth: '阅读自然历史类书籍',
-    },
-    {
-      name: 'Inner Peace (内观自在)',
-      routine: '睡前冥想 + 听佛乐',
-      health: '每晚泡豆子准备明日饮食',
-      growth: '阅读金刚经/灵性书籍',
-    }
-  ];
-
-  const t = archetypes[seed % archetypes.length];
-
   return {
-    id: `vision-${Date.now()}-${index}`,
-    imageUrl: URL.createObjectURL(file),
-    uploadedAt: Date.now(),
     visualDNA: {
-      colorPalette: ['#1A1A1A', '#4CAF50', '#E0E0E0'],
-      materials: ['digital', 'paper', 'nature'],
-      lighting: 'focused studio light',
-      spatialFeeling: 'organized structure',
-      emotionalCore: ['clarity', 'discipline', 'growth'],
-      archetype: t.name,
+      colorPalette: ['#E8DCC4', '#C9A882', '#8B7355'],
+      materials: ['Terra Cotta', 'Linen', 'Wood', 'Brass'],
+      lighting: 'Warm Morning Light',
+      spatialFeeling: 'Mediterranean Slow Life',
+      emotionalCore: ['Calm', 'Grounded', 'Intentional'],
+      archetype: 'Mediterranean Creator'
     },
     lifestyleInference: {
-      pace: 'structured yet flowing',
-      values: ['continuous improvement', 'mind-body connection'],
-      dailyRituals: [t.routine, 'evening review', 'healthy prep'],
+      pace: 'Slow & Intentional',
+      values: ['Quality over Quantity', 'Handmade over Industrial', 'Present moment'],
+      dailyRituals: ['Morning barefoot meditation', 'Hand-pour coffee ritual', 'Candlelight reflection']
     },
     sensoryTriggers: {
-      smell: 'soy milk or tea',
-      sound: 'Buddhist music or nature',
-      touch: 'smooth keyboard or paper',
+      smell: 'Fresh rosemary & Coffee',
+      sound: 'Breeze in linen curtains',
+      touch: 'Rough terra cotta & Smooth wood'
     },
     sopMapping: [
       {
         module: 'WRITE_PLAN',
-        subSystem: 'Inspiration',
-        visualCue: 'Mock: 图片结构感',
-        actions: ['将此愿景加入 Notion 收集箱'],
+        subSystem: '收集箱',
+        visualCue: '整体氛围',
+        actions: ['将"地中海慢生活"愿景图存入收集箱', '提取"陶土/亚麻"关键词']
       },
       {
         module: 'PLAN',
-        subSystem: 'OKR',
-        visualCue: 'Mock: 目标导向',
-        actions: ['设定相关 Key Result'],
+        subSystem: 'OKR及项目管理',
+        visualCue: '生活方式转变',
+        actions: ['设定目标: 打造地中海风格居家空间', 'KR: 更换所有塑料容器为陶/木材质']
       },
       {
         module: 'DO',
-        subSystem: 'Daily Routine',
-        visualCue: 'Mock: 生活方式',
-        actions: [t.routine],
+        subSystem: '生活物品库存',
+        visualCue: '材质细节',
+        actions: ['采购手工陶碗和木砧板', '断舍离化纤衣物，购入亚麻家居服']
       },
       {
         module: 'DO',
-        subSystem: 'Health',
-        visualCue: 'Mock: 健康暗示',
-        actions: [t.health],
+        subSystem: '营养与健康',
+        visualCue: '饮食暗示',
+        actions: ['建立"慢食仪式": 每餐前5分钟感恩', '准备全谷物与橄榄油食谱']
       },
       {
         module: 'DO',
-        subSystem: 'Growth',
-        visualCue: 'Mock: 学习氛围',
-        actions: [t.growth],
+        subSystem: 'R.I.A. 阅读系统',
+        visualCue: '知识氛围',
+        actions: ['阅读《Wabi-Sabi》与材质美学书籍', '在 Heptabase 输出阅读笔记']
+      },
+      {
+        module: 'DO',
+        subSystem: '活动与旅行计划',
+        visualCue: '文化暗示',
+        actions: ['周末探访本地陶艺工作室', '计划一次地中海文化相关的旅行']
       },
       {
         module: 'CHECK',
-        subSystem: 'Review',
-        visualCue: 'Mock: 反思',
-        actions: ['晚间15分钟复盘今日执行'],
+        subSystem: '回顾纠偏',
+        visualCue: '一致性',
+        actions: ['每日对比空间照片与愿景图', '复盘 DAILY_ROUTINE 执行率']
+      }
+    ]
+  };
+}
+
+async function generateFallbackAnalysis(file: File, index: number): Promise<VisionAnalysis> {
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  // Return a "Safe Mode" analysis instead of empty data so the UI doesn't break
+  return {
+    id: `vision-fallback-${index}`,
+    imageUrl: URL.createObjectURL(file),
+    uploadedAt: Date.now(),
+    visualDNA: { 
+        colorPalette: ['#A8A8A8', '#E0E0E0', '#505050'], 
+        materials: ['Concrete', 'Glass', 'Steel'], 
+        lighting: 'Neutral Daylight', 
+        spatialFeeling: 'Minimalist Focus', 
+        emotionalCore: ['Clarity', 'Structure', 'Efficiency'], 
+        archetype: 'Systematic Essentialist (Safe Mode)' 
+    },
+    lifestyleInference: { 
+        pace: 'Steady & Organized', 
+        values: ['Order', 'Function', 'Simplicity'], 
+        dailyRituals: ['Morning Planning', 'Deep Work Block', 'Evening Review'] 
+    },
+    sensoryTriggers: { 
+        smell: 'Clean Air', 
+        sound: 'White Noise', 
+        touch: 'Smooth Surfaces' 
+    },
+    sopMapping: [
+      {
+        module: 'WRITE_PLAN',
+        subSystem: '收集箱',
+        visualCue: 'System Error / Offline',
+        actions: ['Check API Key Configuration', 'Review System Settings']
       },
+      {
+        module: 'PLAN',
+        subSystem: 'OKR及项目管理',
+        visualCue: 'Structure',
+        actions: ['Set clear goals for connectivity', 'Establish fallback protocols']
+      },
+      {
+        module: 'DO',
+        subSystem: '生活物品库存',
+        visualCue: 'Organization',
+        actions: ['Organize local workspace', 'Declutter digital assets']
+      },
+       {
+        module: 'DO',
+        subSystem: 'R.I.A. 阅读系统',
+        visualCue: 'Knowledge',
+        actions: ['Read API documentation', 'Study system architecture']
+      },
+      {
+        module: 'CHECK',
+        subSystem: '回顾纠偏',
+        visualCue: 'Review',
+        actions: ['Troubleshoot connection issues', 'Verify API quotas']
+      }
     ],
     manifestationPath: [
-      { week: 1, focus: 'Plan', actions: ['收集灵感', '拆解OKR'] },
-      { week: 2, focus: 'Do: Routine', actions: [t.routine, t.health] },
-      { week: 3, focus: 'Do: Growth', actions: [t.growth, '分享输出'] },
-      { week: 4, focus: 'Check', actions: ['复盘数据', '迭代SOP'] },
-    ],
+        { week: 1, focus: 'System Check', actions: ['Verify Network', 'Check Keys'] },
+        { week: 2, focus: 'Optimization', actions: ['Refine Inputs', 'Test Outputs'] },
+        { week: 3, focus: 'Deployment', actions: ['Scale Up', 'Automate'] },
+        { week: 4, focus: 'Maintenance', actions: ['Regular Audits', 'Updates'] }
+    ]
   };
 }
 
