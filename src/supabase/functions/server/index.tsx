@@ -317,4 +317,77 @@ app.post("/make-server-dcd239fe/analyze-proxy", async (c) => {
   }
 });
 
+// 8. ModelScope (Qwen) Integration
+app.post("/make-server-dcd239fe/analyze-modelscope", async (c) => {
+  try {
+    const { messages, model = "Qwen/Qwen-VL-Chat" } = await c.req.json();
+    // Prioritize 'mota_key' as requested by user, fall back to MS_API_KEY if needed
+    const apiKey = Deno.env.get('mota_key') || Deno.env.get('MS_API_KEY');
+
+    if (!apiKey) {
+      return c.json({ error: { message: "Server configuration error: ModelScope API Key (mota_key) is missing." } }, 500);
+    }
+
+    console.log(`Calling ModelScope (${model})...`);
+
+    // Use the user-provided ModelScope Inference API endpoint
+    const url = "https://api-inference.modelscope.cn/v1/chat/completions";
+    
+    // Qwen-VL-Chat often performs better without a system role in the inference API
+    // We merge system content into the first user message if possible
+    let finalMessages = messages;
+    
+    const systemMsg = messages.find((m: any) => m.role === 'system');
+    if (systemMsg) {
+       // Filter out system message
+       const otherMessages = messages.filter((m: any) => m.role !== 'system');
+       // Prepend system text to the last user message text
+       if (otherMessages.length > 0) {
+           const lastMsg = otherMessages[otherMessages.length - 1];
+           if (lastMsg.role === 'user' && Array.isArray(lastMsg.content)) {
+               // Find the text part
+               const textPart = lastMsg.content.find((c: any) => c.type === 'text');
+               if (textPart) {
+                   // Append system prompt to user text
+                   let systemText = "";
+                   if (Array.isArray(systemMsg.content)) {
+                       systemText = systemMsg.content.map((c: any) => c.text).join('\n');
+                   } else {
+                       systemText = systemMsg.content;
+                   }
+                   textPart.text = `[SYSTEM INSTRUCTION: ${systemText}]\n\n${textPart.text}`;
+               }
+           }
+       }
+       finalMessages = otherMessages;
+    }
+    
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: finalMessages,
+        stream: false
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+       console.error("ModelScope API Error:", data);
+       return c.json(data, response.status);
+    }
+
+    return c.json(data);
+
+  } catch (error) {
+    console.error("ModelScope Route Error:", error);
+    return c.json({ error: error.message }, 500);
+  }
+});
+
 Deno.serve(app.fetch);

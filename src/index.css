@@ -763,6 +763,10 @@
     resize: both;
   }
 
+  .list-disc {
+    list-style-type: disc;
+  }
+
   .grid-cols-1 {
     grid-template-columns: repeat(1, minmax(0, 1fr));
   }
@@ -1322,6 +1326,10 @@
     padding-top: calc(var(--spacing) * 4);
   }
 
+  .pl-4 {
+    padding-left: calc(var(--spacing) * 4);
+  }
+
   .pl-16 {
     padding-left: calc(var(--spacing) * 16);
   }
@@ -1486,6 +1494,10 @@
 
   .opacity-60 {
     opacity: .6;
+  }
+
+  .opacity-80 {
+    opacity: .8;
   }
 
   .shadow-2xl {

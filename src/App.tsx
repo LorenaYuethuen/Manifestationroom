@@ -80,19 +80,11 @@ export default function App() {
   }, []);
 
   // AUTO-CONFIG: Bootstrap API Keys provided by user
+  // (Deprecated: Moving to Server-Side Keys)
   useEffect(() => {
-    const bootstrapKeys = () => {
-        // 1. Wipe all old keys to ensure a clean slate
-        localStorage.removeItem('gemini_api_key');
-        localStorage.removeItem('anthropic_api_key'); 
-        
-        // 2. Set ONLY the specific key requested by the user
-        const targetKey = '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';
-        localStorage.setItem('anthropic_api_key', targetKey);
-        
-        console.log('⚡ API Configuration Reset: Using ONLY the sk-ant-api03... key');
-    };
-    bootstrapKeys();
+     // Optional: Clear old keys to avoid confusion
+     localStorage.removeItem('gemini_api_key');
+     localStorage.removeItem('anthropic_api_key'); 
   }, []);
 
   // Fetch Data on Load
@@ -128,15 +120,6 @@ export default function App() {
 
   const handleCreate = async (file: File) => {
     try {
-      // Pre-check for API keys to avoid silent failures
-      const hasKey = localStorage.getItem('anthropic_api_key') || localStorage.getItem('gemini_api_key');
-      if (!hasKey) {
-        if (!confirm("⚠️ No AI API Key found in Settings.\n\nThe system will run in 'Offline Simulation Mode'. Do you want to continue?")) {
-            setView('settings');
-            return;
-        }
-      }
-
       setLoading(true);
       // 1. Upload Image First
       const publicUrl = await uploadImage(file);
@@ -366,15 +349,13 @@ function SettingsView({ onBack }: any) {
   const [keys, setKeys] = useState({
     notion: localStorage.getItem('notion_api_key') || '',
     page: localStorage.getItem('notion_page_id') || '',
-    anthropic: localStorage.getItem('anthropic_api_key') || '',
-    gemini: localStorage.getItem('gemini_api_key') || ''
+    anthropic: localStorage.getItem('anthropic_api_key') || ''
   });
 
   const save = () => {
     localStorage.setItem('notion_api_key', keys.notion);
     localStorage.setItem('notion_page_id', keys.page);
     localStorage.setItem('anthropic_api_key', keys.anthropic);
-    localStorage.setItem('gemini_api_key', keys.gemini);
     alert("Settings Saved");
     onBack();
   };
@@ -395,14 +376,28 @@ function SettingsView({ onBack }: any) {
           <label className="text-sm text-neutral-500">Notion Page ID</label>
           <input type="text" value={keys.page} onChange={e => setKeys({...keys, page: e.target.value})} className="w-full bg-neutral-900 border border-neutral-800 p-3 rounded-xl" />
         </div>
+        
         <div className="space-y-2">
-          <label className="text-sm text-neutral-500">Anthropic API Key</label>
-          <input type="password" value={keys.anthropic} onChange={e => setKeys({...keys, anthropic: e.target.value})} className="w-full bg-neutral-900 border border-neutral-800 p-3 rounded-xl" />
+          <label className="text-sm text-neutral-500">Anthropic API Key (Optional)</label>
+          <input 
+            type="password" 
+            placeholder="sk-..."
+            value={keys.anthropic} 
+            onChange={e => setKeys({...keys, anthropic: e.target.value})} 
+            className="w-full bg-neutral-900 border border-neutral-800 p-3 rounded-xl" 
+          />
+          <p className="text-xs text-neutral-500">If provided, system will prioritize Claude. If failed/missing, falls back to server-side Qwen.</p>
         </div>
-        <div className="space-y-2">
-          <label className="text-sm text-neutral-500">Gemini API Key</label>
-          <input type="password" value={keys.gemini} onChange={e => setKeys({...keys, gemini: e.target.value})} className="w-full bg-neutral-900 border border-neutral-800 p-3 rounded-xl" />
+
+        <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-500 text-sm">
+           <p className="font-medium">⚡ Dual-Engine AI System</p>
+           <ul className="list-disc pl-4 mt-1 opacity-80 space-y-1">
+             <li>Primary: Claude 3.5 Sonnet (User Key)</li>
+             <li>Secondary: ModelScope Qwen (Server Key)</li>
+             <li>Fallback: Simulation Mode</li>
+           </ul>
         </div>
+
         <button onClick={save} className="w-full py-3 bg-white text-black rounded-xl font-medium mt-8 hover:bg-neutral-200">Save Changes</button>
       </div>
     </div>

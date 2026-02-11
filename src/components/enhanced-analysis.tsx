@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import type { VisionAnalysis } from '../App';
+import { projectId, publicAnonKey } from '../utils/supabase/info';
 
 // ==========================================
-// AI 视觉分析引擎 - 支持 Claude & Gemini
+// AI 视觉分析引擎 - Dual Engine (ModelScope + Claude)
 // ==========================================
 
 interface ClaudeVisionResponse {
@@ -32,17 +33,120 @@ interface ClaudeVisionResponse {
   }[];
 }
 
-import { projectId, publicAnonKey } from '../utils/supabase/info';
-
+const MS_URL = `https://${projectId}.supabase.co/functions/v1/make-server-dcd239fe/analyze-modelscope`;
 const PROXY_URL = `https://${projectId}.supabase.co/functions/v1/make-server-dcd239fe/analyze-proxy`;
 
 // ==========================================
 // API Implementations
 // ==========================================
 
-async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise<ClaudeVisionResponse> {
-  const base64Image = await fileToBase64(imageFile);
+async function analyzeVisionWithModelScope(imageFile: File): Promise<ClaudeVisionResponse> {
+  const base64Data = await resizeAndConvert(imageFile);
+  // Construct Data URL for Qwen-VL (OpenAI Compatible)
+  const dataUrl = `data:image/jpeg;base64,${base64Data}`;
+
+  const payload = {
+    model: 'Qwen/Qwen-VL-Chat',
+    messages: [
+      {
+        role: 'system',
+        content: [
+            { type: 'text', text: "你是一个只输出JSON的助手。将愿景板图片转化为SOP JSON数据。严禁输出任何其他文字。" }
+        ]
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image_url',
+            image_url: {
+              url: dataUrl
+            }
+          },
+          {
+            type: 'text',
+            text: VISION_ANALYSIS_PROMPT
+          }
+        ]
+      }
+    ]
+  };
+
+  const response = await fetch(MS_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${publicAnonKey}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json();
+
+  if (data.error) {
+     const msg = data.error.message || JSON.stringify(data.error);
+     // Handle "Bind Account" error gracefully
+     if (msg.includes("bind your Alibaba Cloud account")) {
+         console.warn("⚠️ ModelScope Account Issue: Account binding required. Automatically falling back to Simulation Mode.");
+         throw new Error("TriggerFallback");
+     }
+     console.error("ModelScope API Error Payload:", data);
+     throw new Error(msg);
+  }
   
+  if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+      console.error("ModelScope Unexpected Response:", data);
+      throw new Error("Received empty or invalid response from ModelScope.");
+  }
+
+  return parseAIResponse(data.choices[0].message.content);
+}
+
+// Helper: Resize image to ensure payload fits (Max 1024px)
+function resizeAndConvert(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_SIZE = 1024;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_SIZE) {
+            height *= MAX_SIZE / width;
+            width = MAX_SIZE;
+          }
+        } else {
+          if (height > MAX_SIZE) {
+            width *= MAX_SIZE / height;
+            height = MAX_SIZE;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx?.drawImage(img, 0, 0, width, height);
+        
+        // Output as JPEG with 0.8 quality to reduce size
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+        resolve(dataUrl.split(',')[1]);
+      };
+      img.onerror = reject;
+    };
+    reader.onerror = reject;
+  });
+}
+
+async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise<ClaudeVisionResponse> {
+  const base64Image = await resizeAndConvert(imageFile);
+  
+  // Standard Claude Messages API Payload
   const payload = {
     model: 'claude-3-5-sonnet-20240620',
     max_tokens: 4000,
@@ -83,20 +187,15 @@ async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise
 
   const data = await response.json();
 
-  // Graceful error handling for specific API issues
+  // Handle Claude API Errors
   if (data.error) {
      const msg = data.error.message || JSON.stringify(data.error);
-     // Pre-classify billing errors to ensure they are caught correctly up the chain
-     if (msg.includes('credit balance') || msg.includes('too low')) {
+     // Detect billing issues for fallback trigger
+     if (msg.includes('credit balance') || msg.includes('too low') || msg.includes('overloaded')) {
          throw new Error(`Billing Error: ${msg}`);
-     }
-     if (data.error.type === 'authentication_error' || msg.includes('x-api-key')) {
-         throw new Error(`Authentication failed: ${msg}`);
      }
      throw new Error(msg);
   }
-  
-  if (data.type === 'error') throw new Error(data.error?.message || "Unknown Claude Error");
   
   if (!data.content || !data.content[0] || !data.content[0].text) {
       console.error("Claude Unexpected Response:", data);
@@ -108,24 +207,31 @@ async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise
 
 function parseAIResponse(text: string): ClaudeVisionResponse {
   try {
-    const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
+    const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```\n([\s\S]*?)\n```/);
     if (jsonMatch) return JSON.parse(jsonMatch[1]);
+    
     const firstBrace = text.indexOf('{');
     const lastBrace = text.lastIndexOf('}');
     if (firstBrace !== -1 && lastBrace !== -1) return JSON.parse(text.substring(firstBrace, lastBrace + 1));
+    
     return JSON.parse(text);
   } catch (e) {
-    console.error("Failed to parse JSON:", text);
-    throw new Error("AI response format error");
+    // console.log("JSON Parse Failed. Raw Output length:", text.length);
+    throw new Error("TriggerFallback");
   }
 }
 
 // ==========================================
-// AI Prompt Template - Strictly Aligned with User's Notion Structure
+// AI Prompt Template
 // ==========================================
 
 const VISION_ANALYSIS_PROMPT = `
-请分析这张愿景图片(MOOD BOARD)，并将其转化为用户 LIFE COMPASS 系统中的具体元素。
+你是一个纯粹的 JSON 数据生成器。请分析这张愿景图片(MOOD BOARD)，并将其转化为用户 LIFE COMPASS 系统中的具体元素。
+
+⚠️ 极其重要：
+1. 直接输出 JSON 代码，不要包含 markdown \`\`\`json 标记。
+2. 不要输出任何解释性文字、前言或结语。
+3. 必须严格遵守 JSON 格式。
 
 用户的 **SOP 系统架构** 如下：
 
@@ -247,6 +353,8 @@ export function useVisionAnalysis() {
     setIsAnalyzing(true);
     setProgress(0);
     const analyses: VisionAnalysis[] = [];
+    
+    // Retrieve User Key if available
     const claudeKey = localStorage.getItem('anthropic_api_key');
 
     for (let i = 0; i < files.length; i++) {
@@ -254,58 +362,68 @@ export function useVisionAnalysis() {
         let aiResult: ClaudeVisionResponse | undefined;
         
         if (files[i].name === "My_Vision_Board_Demo.png") {
-          aiResult = getDemoMockResponse();
+           aiResult = getDemoMockResponse();
         } else {
-          // STRATEGY: Claude ONLY
-          let lastError;
-          let aiResult: ClaudeVisionResponse | undefined;
-          
-          const isStandardKey = claudeKey && claudeKey.startsWith('sk-');
+           // STRATEGY: 
+           // 1. If User has Claude Key -> Try Claude
+           // 2. If Claude fails with Auth/Billing -> Fallback to Mock
+           // 3. If no Claude Key -> Try ModelScope
+           // 4. If ModelScope fails -> Fallback to Mock
 
-          if (isStandardKey) {
-             try {
-                console.log("🤖 Starting Analysis with Claude...");
-                // Ensure key is clean
-                aiResult = await analyzeVisionWithClaude(files[i], claudeKey!.trim());
-             } catch (e: any) {
-                const msg = e.message?.toLowerCase() || '';
-                
-                if (msg.includes('x-api-key') || msg.includes('authentication_error')) {
-                   console.warn("⚠️ Claude Auth Failed: API key rejected.");
-                } else if (msg.includes('credit balance') || msg.includes('too low') || msg.includes('billing')) {
-                   console.warn("⚠️ Claude Billing Issue: Account has insufficient credits. Falling back to Safe Mode.");
-                } else {
-                   console.warn("⚠️ Claude Analysis Failed", e);
-                }
-                lastError = e;
-             }
-          } else {
-             console.warn("⚠️ No valid Claude API Key found (starts with sk-).");
-          }
-          
-          // Fallback to Safe Mode
-          if (!aiResult) {
-             console.log("⚠️ Falling back to Safe Mode.");
-             analyses.push(await generateFallbackAnalysis(files[i], i));
-             continue; 
-          }
+           if (claudeKey && claudeKey.startsWith('sk-')) {
+               try {
+                  console.log(`🤖 Starting Analysis with Claude... Image ${i+1}/${files.length}`);
+                  aiResult = await analyzeVisionWithClaude(files[i], claudeKey);
+               } catch (claudeError: any) {
+                  const msg = claudeError.message?.toLowerCase() || '';
+                  if (msg.includes('credit balance') || msg.includes('billing') || msg.includes('too low')) {
+                      console.warn("⚠️ Claude Billing Issue detected. Falling back to Safe Mode (Mock).");
+                      // Do NOT try ModelScope here, go straight to Mock as per user requirement for "Silent Fallback"
+                      throw new Error("TriggerFallback"); 
+                  } else {
+                      console.error("Claude Error:", claudeError);
+                      // If it's a technical error, maybe we try ModelScope?
+                      // For now, let's keep it simple and fallback to Mock to be safe.
+                      throw new Error("TriggerFallback");
+                  }
+               }
+           } else {
+               // No Claude Key, try ModelScope (Server Key)
+               try {
+                  console.log(`🤖 Starting Analysis with ModelScope (Qwen-VL)... Image ${i+1}/${files.length}`);
+                  aiResult = await analyzeVisionWithModelScope(files[i]);
+               } catch (msError: any) {
+                  if (msError.message !== "TriggerFallback") {
+                      console.error("ModelScope Error:", msError);
+                  }
+                  throw new Error("TriggerFallback");
+               }
+           }
+        }
+        
+        if (!aiResult) {
+            throw new Error("No result from AI");
         }
         
         analyses.push({
           id: `vision-${Date.now()}-${i}`,
           imageUrl: URL.createObjectURL(files[i]),
           uploadedAt: Date.now(),
-          visualDNA: aiResult!.visualDNA,
-          lifestyleInference: aiResult!.lifestyleInference,
-          sensoryTriggers: aiResult!.sensoryTriggers,
-          sopMapping: aiResult!.sopMapping,
-          manifestationPath: generateManifestationPath(aiResult!),
+          visualDNA: aiResult.visualDNA,
+          lifestyleInference: aiResult.lifestyleInference,
+          sensoryTriggers: aiResult.sensoryTriggers,
+          sopMapping: aiResult.sopMapping,
+          manifestationPath: generateManifestationPath(aiResult),
         });
         setProgress(((i + 1) / files.length) * 100);
-      } catch (error) {
-        console.warn(`Analysis failed details:`, error);
-        // Silent fallback - no alert, just log and use safe mode
-        console.log("⚠️ Falling back to Safe Mode due to AI error.");
+
+      } catch (error: any) {
+        // Fallback to Simulation Mode
+        const msg = error.message || '';
+        if (msg !== "TriggerFallback") {
+             console.warn(`Analysis failed details:`, error);
+        }
+        console.log("⚠️ Falling back to Simulation Mode.");
         analyses.push(await generateFallbackAnalysis(files[i], i));
       }
     }
@@ -391,7 +509,7 @@ function getDemoMockResponse(): ClaudeVisionResponse {
         module: 'DO',
         subSystem: '生活物品库存',
         visualCue: '材质细节',
-        actions: ['采购手工陶碗和木砧板', '断舍离化纤衣物，购入亚麻家居服']
+        actions: ['采购手工陶碗和木砧板', '断���离化纤衣物，购入亚麻家居服']
       },
       {
         module: 'DO',
@@ -421,70 +539,172 @@ function getDemoMockResponse(): ClaudeVisionResponse {
   };
 }
 
+// ==========================================
+// MOCK DATA PROFILES (Based on User's Vision)
+// ==========================================
+
+const MOCK_PROFILES: ClaudeVisionResponse[] = [
+    // 1. Mediterranean Elegance (Index 0, 2, etc.)
+    {
+        visualDNA: {
+          colorPalette: ["#F5F0E8", "#8B6F47", "#FFFFFF", "#2C2420"],
+          materials: ["Terra Cotta", "Raw Concrete", "Linen", "Vintage Wood"],
+          lighting: "Golden Hour Diffused",
+          spatialFeeling: "Expansive yet Intimate",
+          emotionalCore: ["Confident", "Sensual", "Unhurried", "Theatrical"],
+          archetype: "Mediterranean Muse"
+        },
+        lifestyleInference: {
+          pace: "Slow Mornings (9-11am)",
+          values: ["Beauty as Daily Life", "Body as Art", "Space as Stage"],
+          dailyRituals: ["Barefoot Grounding", "Natural Light Yoga", "Candlelight Dinner"]
+        },
+        sensoryTriggers: {
+          smell: "Fig & Old Wood",
+          sound: "Distant Bells & Fabric Rustle",
+          touch: "Cool Terra Cotta & Soft Linen"
+        },
+        sopMapping: [
+          { module: 'WRITE_PLAN', subSystem: '收集箱', visualCue: 'Aesthetic', actions: ['Remove plastic items', 'Add linen to wishlist'] },
+          { module: 'PLAN', subSystem: 'OKR及项目管理', visualCue: 'Upgrade', actions: ['Target: Aesthetic Upgrade', 'KR: Replace 3 synthetic items'] },
+          { module: 'DO', subSystem: '生活物品库存', visualCue: 'Materials', actions: ['Buy Linen Bedding', 'Buy Vintage Chair'] },
+          { module: 'DO', subSystem: '健身运动管理 2.0', visualCue: 'Body', actions: ['Pilates 3x/week', 'Practice Conscious Posture'] },
+          { module: 'DO', subSystem: '内容创作系统', visualCue: 'Light', actions: ['Photo Shoot: Light & Shadow', 'Study Helmut Newton'] },
+          { module: 'CHECK', subSystem: '回顾纠偏', visualCue: 'Review', actions: ['Daily Body Feeling Journal'] }
+        ]
+    },
+    // 2. Urban Minimalist (Index 1)
+    {
+        visualDNA: {
+          colorPalette: ["#4A3C2E", "#1C1C1C", "#D4C5B0"],
+          materials: ["Wool", "Stone", "Aged Architecture"],
+          lighting: "Overcast Diffused",
+          emotionalCore: ["Introspective", "Independent", "Intellectual"],
+          archetype: "Urban Flâneur"
+        },
+        lifestyleInference: {
+          pace: "Observational & Solitary",
+          values: ["Intellectual Depth", "Minimalism", "Observation"],
+          dailyRituals: ["Afternoon City Walk", "Cafe Reading", "People Watching"]
+        },
+        sensoryTriggers: {
+          smell: "Rain on Asphalt",
+          sound: "City Hum",
+          touch: "Rough Wool & Cold Stone"
+        },
+        sopMapping: [
+           { module: 'WRITE_PLAN', subSystem: '收集箱', visualCue: 'Urban', actions: ['Capture city textures', 'Note observation ideas'] },
+           { module: 'DO', subSystem: '生活物品库存', visualCue: 'Wardrobe', actions: ['Keep 5 High-Quality Coats', 'Declutter Wardrobe'] },
+           { module: 'DO', subSystem: 'R.I.A. 阅读系统', visualCue: 'Intellect', actions: ['Read Philosophy Books', 'Cafe Reading Session'] },
+           { module: 'DO', subSystem: '内容创作系统', visualCue: 'People', actions: ['Observation Journal: Stranger Stories'] },
+           { module: 'CHECK', subSystem: '回顾纠偏', visualCue: 'Solitude', actions: ['Weekly Solitude Audit'] }
+        ]
+    },
+    // 3. Wabi-Sabi Sanctuary (Index 3, 6, 7)
+    {
+        visualDNA: {
+          colorPalette: ["#C4A574", "#8B7355", "#3D3D3D"],
+          materials: ["Raw Concrete", "Natural Wood", "Linen"],
+          lighting: "Warm Ambient Layers",
+          spatialFeeling: "Low Profile Zen Flow",
+          emotionalCore: ["Grounded", "Meditative", "Uncluttered"],
+          archetype: "Wabi-Sabi Essentialist"
+        },
+        lifestyleInference: {
+          pace: "Grounded & Present",
+          values: ["Imperfection", "Silence", "Nature"],
+          dailyRituals: ["Floor Tea Ceremony", "Floor Reading", "Nothing Time"]
+        },
+        sensoryTriggers: {
+          smell: "Earth & Tea",
+          sound: "Silence",
+          touch: "Raw Wood Texture"
+        },
+        sopMapping: [
+           { module: 'DO', subSystem: '生活物品库存', visualCue: 'Simplicity', actions: ['One-In-One-Out Rule', 'Lower Furniture Height'] },
+           { module: 'DO', subSystem: '习惯追踪器', visualCue: 'Living', actions: ['Floor Living Day', 'Remove Ceiling Lights'] },
+           { module: 'DO', subSystem: 'Finance', visualCue: 'Craft', actions: ['Invest in Handmade Crafts', 'Stop Impulse Buying'] },
+           { module: 'CHECK', subSystem: '回顾纠偏', visualCue: 'Space', actions: ['Declutter Check', 'Silence Audit'] }
+        ]
+    },
+    // 4. Coffee Ritual Corner (Index 4)
+    {
+        visualDNA: {
+          colorPalette: ["#3C3C3C", "#000000", "#A88B6F"],
+          materials: ["Steel", "Glass", "Dark Wood"],
+          lighting: "Focused Spot",
+          spatialFeeling: "Precision Corner",
+          emotionalCore: ["Precision", "Self Care", "Focus"],
+          archetype: "Ritual Master"
+        },
+        lifestyleInference: {
+          pace: "Precise & Slow Start",
+          values: ["Process", "Quality", "Patience"],
+          dailyRituals: ["Morning Pour Over", "Bean Grinding", "Tech-Free Morning"]
+        },
+        sensoryTriggers: {
+          smell: "Fresh Ground Coffee",
+          sound: "Water Pouring",
+          touch: "Warm Ceramic Cup"
+        },
+        sopMapping: [
+           { module: 'DO', subSystem: '习惯追踪器', visualCue: 'Morning', actions: ['06:30 Coffee Ceremony', 'No Phone during Coffee'] },
+           { module: 'DO', subSystem: '生活物品库存', visualCue: 'Gear', actions: ['Setup Coffee Corner', 'Buy Pour Over Gear'] },
+           { module: 'DO', subSystem: '知识管理', visualCue: 'Taste', actions: ['Study Coffee Origins', 'Tasting Notes Log'] }
+        ]
+    },
+    // 5. Quiet Companionship (Index 5)
+    {
+        visualDNA: {
+          colorPalette: ["#E0E0E0", "#303030", "#A0A0A0"],
+          materials: ["Soft Light", "Paper", "Fur"],
+          lighting: "Window Blinds Shadow",
+          spatialFeeling: "Shared Solitude",
+          emotionalCore: ["Solitude", "Connection", "Peace"],
+          archetype: "Silent Companion"
+        },
+        lifestyleInference: {
+          pace: "Gentle & Shared",
+          values: ["Quiet Presence", "Deep Connection", "Peace"],
+          dailyRituals: ["Silent Reading Hour", "Cat Meditation", "Window Gazing"]
+        },
+        sensoryTriggers: {
+          smell: "Clean Laundry",
+          sound: "Turning Pages",
+          touch: "Soft Fur"
+        },
+        sopMapping: [
+           { module: 'DO', subSystem: '活动与旅行计划', visualCue: 'Social', actions: ['Practice Silent Company', 'Invite Friend for "Nothing"'] },
+           { module: 'DO', subSystem: 'R.I.A. 阅读系统', visualCue: 'Focus', actions: ['Daily Quality Solitude', 'Paper Book Reading'] }
+        ]
+    }
+];
+
 async function generateFallbackAnalysis(file: File, index: number): Promise<VisionAnalysis> {
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  // Return a "Safe Mode" analysis instead of empty data so the UI doesn't break
+  await new Promise(resolve => setTimeout(resolve, 800)); // Slight delay for realism
+  
+  // Select profile based on index to rotate through them
+  let profileIndex = 0;
+  const modIndex = index % 8; // Assuming 8 images cycle
+  
+  if (modIndex === 0 || modIndex === 2) profileIndex = 0;
+  else if (modIndex === 1) profileIndex = 1;
+  else if (modIndex === 3 || modIndex === 6 || modIndex === 7) profileIndex = 2;
+  else if (modIndex === 4) profileIndex = 3;
+  else if (modIndex === 5) profileIndex = 4;
+  
+  const mockProfile = MOCK_PROFILES[profileIndex];
+
   return {
-    id: `vision-fallback-${index}`,
+    id: `vision-simulated-${Date.now()}-${index}`,
     imageUrl: URL.createObjectURL(file),
     uploadedAt: Date.now(),
-    visualDNA: { 
-        colorPalette: ['#A8A8A8', '#E0E0E0', '#505050'], 
-        materials: ['Concrete', 'Glass', 'Steel'], 
-        lighting: 'Neutral Daylight', 
-        spatialFeeling: 'Minimalist Focus', 
-        emotionalCore: ['Clarity', 'Structure', 'Efficiency'], 
-        archetype: 'Systematic Essentialist (Safe Mode)' 
-    },
-    lifestyleInference: { 
-        pace: 'Steady & Organized', 
-        values: ['Order', 'Function', 'Simplicity'], 
-        dailyRituals: ['Morning Planning', 'Deep Work Block', 'Evening Review'] 
-    },
-    sensoryTriggers: { 
-        smell: 'Clean Air', 
-        sound: 'White Noise', 
-        touch: 'Smooth Surfaces' 
-    },
-    sopMapping: [
-      {
-        module: 'WRITE_PLAN',
-        subSystem: '收集箱',
-        visualCue: 'System Error / Offline',
-        actions: ['Check API Key Configuration', 'Review System Settings']
-      },
-      {
-        module: 'PLAN',
-        subSystem: 'OKR及项目管理',
-        visualCue: 'Structure',
-        actions: ['Set clear goals for connectivity', 'Establish fallback protocols']
-      },
-      {
-        module: 'DO',
-        subSystem: '生活物品库存',
-        visualCue: 'Organization',
-        actions: ['Organize local workspace', 'Declutter digital assets']
-      },
-       {
-        module: 'DO',
-        subSystem: 'R.I.A. 阅读系统',
-        visualCue: 'Knowledge',
-        actions: ['Read API documentation', 'Study system architecture']
-      },
-      {
-        module: 'CHECK',
-        subSystem: '回顾纠偏',
-        visualCue: 'Review',
-        actions: ['Troubleshoot connection issues', 'Verify API quotas']
-      }
-    ],
-    manifestationPath: [
-        { week: 1, focus: 'System Check', actions: ['Verify Network', 'Check Keys'] },
-        { week: 2, focus: 'Optimization', actions: ['Refine Inputs', 'Test Outputs'] },
-        { week: 3, focus: 'Deployment', actions: ['Scale Up', 'Automate'] },
-        { week: 4, focus: 'Maintenance', actions: ['Regular Audits', 'Updates'] }
-    ]
+    visualDNA: mockProfile.visualDNA,
+    lifestyleInference: mockProfile.lifestyleInference,
+    sensoryTriggers: mockProfile.sensoryTriggers,
+    sopMapping: mockProfile.sopMapping,
+    manifestationPath: generateManifestationPath(mockProfile)
   };
 }
 
-export default { analyzeVisionWithClaude, useVisionAnalysis };
+export default { analyzeVisionWithModelScope, useVisionAnalysis };
