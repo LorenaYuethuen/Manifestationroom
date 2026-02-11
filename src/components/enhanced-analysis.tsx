@@ -32,6 +32,10 @@ interface ClaudeVisionResponse {
   }[];
 }
 
+import { projectId, publicAnonKey } from '../utils/supabase/info';
+
+const PROXY_URL = `https://${projectId}.supabase.co/functions/v1/make-server-dcd239fe/analyze-proxy`;
+
 // ==========================================
 // API Implementations
 // ==========================================
@@ -39,97 +43,55 @@ interface ClaudeVisionResponse {
 async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise<ClaudeVisionResponse> {
   const base64Image = await fileToBase64(imageFile);
   
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const payload = {
+    model: 'claude-3-5-sonnet-20240620',
+    max_tokens: 4000,
+    system: "你是一个协助用户进行'生活显化'的AI架构师。用户有一套完整的 LIFE COMPASS 系统，你的任务是将愿景板(Mood Board)中的元素，严格按照用户的 SOP 框架拆解并分发到具体的 DATABASE 中。",
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: imageFile.type,
+              data: base64Image,
+            },
+          },
+          {
+            type: 'text',
+            text: VISION_ANALYSIS_PROMPT,
+          },
+        ],
+      },
+    ],
+  };
+
+  const response = await fetch(PROXY_URL, {
     method: 'POST',
-    headers: {
+    headers: { 
       'Content-Type': 'application/json',
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-requests': 'true', 
-      'x-api-key': apiKey,
+      'Authorization': `Bearer ${publicAnonKey}`
     },
     body: JSON.stringify({
-      model: 'claude-3-5-sonnet-20240620',
-      max_tokens: 4000,
-      system: "你是一个协助用户进行'生活显化'的AI架构师。用户有一套完整的 LIFE COMPASS 系统，你的任务是将愿景板(Mood Board)中的元素，严格按照用户的 SOP 框架拆解并分发到具体的 DATABASE 中。",
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: imageFile.type,
-                data: base64Image,
-              },
-            },
-            {
-              type: 'text',
-              text: VISION_ANALYSIS_PROMPT,
-            },
-          ],
-        },
-      ],
-    }),
+      provider: 'claude',
+      apiKey,
+      payload
+    })
   });
 
   const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
-  return parseAIResponse(data.content[0].text);
-}
 
-async function analyzeVisionWithGemini(imageFile: File, apiKey: string): Promise<ClaudeVisionResponse> {
-  const base64Image = await fileToBase64(imageFile);
-  // Optimized model list: prioritized stable versions first, then legacy fallbacks
-  const models = [
-    'gemini-1.5-flash',
-    'gemini-1.5-pro',
-    'gemini-1.5-flash-001',
-    'gemini-1.5-pro-001',
-    'gemini-pro-vision' // Legacy fallback
-  ];
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  if (data.type === 'error') throw new Error(data.error?.message || "Unknown Claude Error");
   
-  let lastError;
-
-  for (const model of models) {
-    try {
-      console.log(`🤖 Trying Gemini Model: ${model}`);
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { text: "你是一个协助用户进行'生活显化'的AI架构师。用户有一套完整的 LIFE COMPASS 系统，你的任务是将愿景板(Mood Board)中的元素，严格按照用户的 SOP 框架拆解并分发到具体的 DATABASE 中。\n\n" + VISION_ANALYSIS_PROMPT },
-              { inline_data: { mime_type: imageFile.type, data: base64Image } }
-            ]
-          }]
-        }),
-      });
-
-      const data = await response.json();
-      
-      // Explicitly handle 404 (Not Found) or 400 (Bad Request) which often means model not found
-      if (data.error) {
-        console.warn(`❌ Gemini Error (${model}):`, data.error);
-        // If specific model not found, continue to next
-        if (data.error.message?.includes('not found') || data.error.message?.includes('not supported')) {
-           console.log(`Model ${model} not available, trying next...`);
-           lastError = new Error(data.error.message);
-           continue; 
-        }
-        throw new Error(data.error.message);
-      }
-      
-      if (!data.candidates?.[0]?.content?.parts?.[0]?.text) throw new Error('Invalid response');
-      return parseAIResponse(data.candidates[0].content.parts[0].text);
-    } catch (e: any) {
-      lastError = e;
-      // If unauthorized, stop trying other models (key is invalid)
-      if (e.message?.includes('API key') || e.message?.includes('PERMISSION')) break;
-    }
+  if (!data.content || !data.content[0] || !data.content[0].text) {
+      console.error("Claude Unexpected Response:", data);
+      throw new Error("Received empty or invalid response from Claude.");
   }
-  throw lastError || new Error('All Gemini models failed');
+
+  return parseAIResponse(data.content[0].text);
 }
 
 function parseAIResponse(text: string): ClaudeVisionResponse {
@@ -274,32 +236,55 @@ export function useVisionAnalysis() {
     setProgress(0);
     const analyses: VisionAnalysis[] = [];
     const claudeKey = localStorage.getItem('anthropic_api_key');
-    const geminiKey = localStorage.getItem('gemini_api_key');
 
     for (let i = 0; i < files.length; i++) {
       try {
-        let aiResult: ClaudeVisionResponse;
+        let aiResult: ClaudeVisionResponse | undefined;
+        
         if (files[i].name === "My_Vision_Board_Demo.png") {
           aiResult = getDemoMockResponse();
         } else {
-          if (geminiKey?.startsWith('AIza')) aiResult = await analyzeVisionWithGemini(files[i], geminiKey);
-          else if (claudeKey?.startsWith('sk-ant')) aiResult = await analyzeVisionWithClaude(files[i], claudeKey);
-          else throw new Error('NO_VALID_API_KEY');
+          // STRATEGY: Claude ONLY (User requested removal of Gemini)
+          let lastError;
+          let aiResult: ClaudeVisionResponse | undefined;
+          
+          const hasClaudeKey = claudeKey && (claudeKey.startsWith('sk-') || claudeKey.startsWith('ms-'));
+
+          if (hasClaudeKey) {
+             try {
+                console.log("🤖 Starting Analysis with Claude...");
+                aiResult = await analyzeVisionWithClaude(files[i], claudeKey!);
+             } catch (e) {
+                console.warn("⚠️ Claude Analysis Failed", e);
+                lastError = e;
+             }
+          } else {
+             console.warn("⚠️ No valid Claude API Key found (starts with sk- or ms-)");
+          }
+          
+          // Fallback to Safe Mode if Claude fails - DO NOT use Gemini
+          if (!aiResult) {
+             console.log("⚠️ Falling back to Safe Mode (Gemini disabled by request).");
+             // Throwing error here will trigger the safe mode catch block below
+             throw lastError || new Error('Claude Analysis failed');
+          }
         }
         
         analyses.push({
           id: `vision-${Date.now()}-${i}`,
           imageUrl: URL.createObjectURL(files[i]),
           uploadedAt: Date.now(),
-          visualDNA: aiResult.visualDNA,
-          lifestyleInference: aiResult.lifestyleInference,
-          sensoryTriggers: aiResult.sensoryTriggers,
-          sopMapping: aiResult.sopMapping,
-          manifestationPath: generateManifestationPath(aiResult),
+          visualDNA: aiResult!.visualDNA,
+          lifestyleInference: aiResult!.lifestyleInference,
+          sensoryTriggers: aiResult!.sensoryTriggers,
+          sopMapping: aiResult!.sopMapping,
+          manifestationPath: generateManifestationPath(aiResult!),
         });
         setProgress(((i + 1) / files.length) * 100);
       } catch (error) {
-        console.warn(`Analysis failed:`, error);
+        console.warn(`Analysis failed details:`, error);
+        // Silent fallback - no alert, just log and use safe mode
+        console.log("⚠️ Falling back to Safe Mode due to AI error.");
         analyses.push(await generateFallbackAnalysis(files[i], i));
       }
     }
@@ -481,4 +466,4 @@ async function generateFallbackAnalysis(file: File, index: number): Promise<Visi
   };
 }
 
-export default { analyzeVisionWithClaude, analyzeVisionWithGemini, useVisionAnalysis };
+export default { analyzeVisionWithClaude, useVisionAnalysis };

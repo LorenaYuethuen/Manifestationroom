@@ -260,4 +260,53 @@ app.post("/make-server-dcd239fe/sync-notion", async (c) => {
   }
 });
 
+// 7. AI Analysis Proxy (Fixes CORS and Region issues)
+app.post("/make-server-dcd239fe/analyze-proxy", async (c) => {
+  try {
+    const { provider, apiKey, payload, model } = await c.req.json();
+    
+    if (!provider || !apiKey || !payload) {
+      return c.json({ error: "Missing required parameters" }, 400);
+    }
+
+    let url = "";
+    let options: RequestInit = {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    };
+
+    if (provider === "claude") {
+      url = "https://api.anthropic.com/v1/messages";
+      options.headers = {
+        ...options.headers,
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      };
+      options.body = JSON.stringify(payload);
+    } else if (provider === "gemini") {
+      // Allow model override, default to flash
+      const targetModel = model || "gemini-1.5-flash";
+      url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
+      options.body = JSON.stringify(payload);
+    } else {
+      return c.json({ error: "Invalid provider" }, 400);
+    }
+
+    console.log(`Proxying to ${provider} (${url})...`);
+    const response = await fetch(url, options);
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error(`${provider} API Error:`, data);
+      return c.json(data, response.status);
+    }
+
+    return c.json(data);
+
+  } catch (error) {
+    console.error("Proxy Error:", error);
+    return c.json({ error: error.message }, 500);
+  }
+});
+
 Deno.serve(app.fetch);

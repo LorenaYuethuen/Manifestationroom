@@ -82,14 +82,12 @@ export default function App() {
   // AUTO-CONFIG: Bootstrap API Keys provided by user
   useEffect(() => {
     const bootstrapKeys = () => {
-        if (!localStorage.getItem('gemini_api_key')) {
-            localStorage.setItem('gemini_api_key', 'AIzaSyCgZDFvhto6tXNlMjKupebjipgwbE-oAPE');
-            console.log('⚡ Auto-configured Gemini API Key');
-        }
-        if (!localStorage.getItem('anthropic_api_key')) {
-            localStorage.setItem('anthropic_api_key', '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');
-            console.log('⚡ Auto-configured Claude API Key');
-        }
+        // Clean up invalid Gemini key if present
+        localStorage.removeItem('gemini_api_key');
+        
+        // Force update Claude key with the new one provided by user
+        localStorage.setItem('anthropic_api_key', 'ms-21679a88-d5c9-4787-85b7-50fcb6c96e9c');
+        console.log('⚡ Updated Claude API Key');
     };
     bootstrapKeys();
   }, []);
