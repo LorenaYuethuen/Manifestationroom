@@ -83,7 +83,19 @@ async function analyzeVisionWithClaude(imageFile: File, apiKey: string): Promise
 
   const data = await response.json();
 
-  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  // Graceful error handling for specific API issues
+  if (data.error) {
+     const msg = data.error.message || JSON.stringify(data.error);
+     // Pre-classify billing errors to ensure they are caught correctly up the chain
+     if (msg.includes('credit balance') || msg.includes('too low')) {
+         throw new Error(`Billing Error: ${msg}`);
+     }
+     if (data.error.type === 'authentication_error' || msg.includes('x-api-key')) {
+         throw new Error(`Authentication failed: ${msg}`);
+     }
+     throw new Error(msg);
+  }
+  
   if (data.type === 'error') throw new Error(data.error?.message || "Unknown Claude Error");
   
   if (!data.content || !data.content[0] || !data.content[0].text) {
@@ -244,29 +256,38 @@ export function useVisionAnalysis() {
         if (files[i].name === "My_Vision_Board_Demo.png") {
           aiResult = getDemoMockResponse();
         } else {
-          // STRATEGY: Claude ONLY (User requested removal of Gemini)
+          // STRATEGY: Claude ONLY
           let lastError;
           let aiResult: ClaudeVisionResponse | undefined;
           
-          const hasClaudeKey = claudeKey && (claudeKey.startsWith('sk-') || claudeKey.startsWith('ms-'));
+          const isStandardKey = claudeKey && claudeKey.startsWith('sk-');
 
-          if (hasClaudeKey) {
+          if (isStandardKey) {
              try {
                 console.log("🤖 Starting Analysis with Claude...");
-                aiResult = await analyzeVisionWithClaude(files[i], claudeKey!);
-             } catch (e) {
-                console.warn("⚠️ Claude Analysis Failed", e);
+                // Ensure key is clean
+                aiResult = await analyzeVisionWithClaude(files[i], claudeKey!.trim());
+             } catch (e: any) {
+                const msg = e.message?.toLowerCase() || '';
+                
+                if (msg.includes('x-api-key') || msg.includes('authentication_error')) {
+                   console.warn("⚠️ Claude Auth Failed: API key rejected.");
+                } else if (msg.includes('credit balance') || msg.includes('too low') || msg.includes('billing')) {
+                   console.warn("⚠️ Claude Billing Issue: Account has insufficient credits. Falling back to Safe Mode.");
+                } else {
+                   console.warn("⚠️ Claude Analysis Failed", e);
+                }
                 lastError = e;
              }
           } else {
-             console.warn("⚠️ No valid Claude API Key found (starts with sk- or ms-)");
+             console.warn("⚠️ No valid Claude API Key found (starts with sk-).");
           }
           
-          // Fallback to Safe Mode if Claude fails - DO NOT use Gemini
+          // Fallback to Safe Mode
           if (!aiResult) {
-             console.log("⚠️ Falling back to Safe Mode (Gemini disabled by request).");
-             // Throwing error here will trigger the safe mode catch block below
-             throw lastError || new Error('Claude Analysis failed');
+             console.log("⚠️ Falling back to Safe Mode.");
+             analyses.push(await generateFallbackAnalysis(files[i], i));
+             continue; 
           }
         }
         

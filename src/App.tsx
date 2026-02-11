@@ -82,12 +82,15 @@ export default function App() {
   // AUTO-CONFIG: Bootstrap API Keys provided by user
   useEffect(() => {
     const bootstrapKeys = () => {
-        // Clean up invalid Gemini key if present
+        // 1. Wipe all old keys to ensure a clean slate
         localStorage.removeItem('gemini_api_key');
+        localStorage.removeItem('anthropic_api_key'); 
         
-        // Force update Claude key with the new one provided by user
-        localStorage.setItem('anthropic_api_key', 'ms-21679a88-d5c9-4787-85b7-50fcb6c96e9c');
-        console.log('⚡ Updated Claude API Key');
+        // 2. Set ONLY the specific key requested by the user
+        const targetKey = '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';
+        localStorage.setItem('anthropic_api_key', targetKey);
+        
+        console.log('⚡ API Configuration Reset: Using ONLY the sk-ant-api03... key');
     };
     bootstrapKeys();
   }, []);

@@ -297,7 +297,15 @@ app.post("/make-server-dcd239fe/analyze-proxy", async (c) => {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error(`${provider} API Error:`, data);
+      // Suppress logging for known user-error types (billing, auth) to keep logs clean
+      const errType = data.error?.type;
+      const errMsg = data.error?.message || '';
+      
+      if (errType === 'authentication_error' || errMsg.includes('credit balance') || errMsg.includes('too low')) {
+          console.warn(`${provider} API Auth/Billing Issue: ${errMsg}`);
+      } else {
+          console.error(`${provider} API Error:`, data);
+      }
       return c.json(data, response.status);
     }
 
